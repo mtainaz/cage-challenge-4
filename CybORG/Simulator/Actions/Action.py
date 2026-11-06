@@ -125,14 +125,11 @@ class RemoteAction(Action):
 
     @staticmethod
     def blocking_host(state: State, src_hostname: str, other_hostname: str):
-        """Returns if the src_hostname is blocked by an ip_address of CIDR filter by other_hostname"""
-        src_host_subnet = state.hostname_subnet_map[src_hostname]
-        other_host_subnet = state.hostname_subnet_map[other_hostname]
+        """Returns True if traffic between src_hostname and other_hostname is blocked.
 
-        ip_blocked = other_hostname in state.blocks and src_hostname in state.blocks[other_hostname]
-        subnet_blocked = other_host_subnet in state.blocks and src_host_subnet in state.blocks[other_host_subnet]
-
-        return (subnet_blocked or ip_blocked)
+        Blocks are two-way: a rule held by either side blocks traffic in both directions.
+        A rule can be subnet<->subnet, subnet<->host or host<->host (see State.is_traffic_blocked)."""
+        return state.is_traffic_blocked(src_hostname, other_hostname)
 
     @staticmethod
     def check_routable(state: State, target: str, source: str) -> bool:

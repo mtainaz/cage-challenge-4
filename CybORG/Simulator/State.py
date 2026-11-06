@@ -61,7 +61,9 @@ class State(CybORGLogger):
     operational_firewall: bool
         Boolean represeting whether the Operational Server in Scenario 2 has a firewall protecting it. Unused in later scenarios.
     blocks: Dict[str:List[str]]
-        Dictionary mapping hostames to a list of hostnames they will block actions from.
+        Dictionary mapping a rule owner to the list of things it blocks traffic with. The owner is a subnet name
+        (or a hostname) and each entry is a subnet name or a hostname. Rules are enforced in both directions, see
+        is_traffic_blocked().
     """
     def __init__(self, scenario: Scenario, np_random: RandomNumberGenerator):
         """Instantiates State class.
@@ -146,6 +148,25 @@ class State(CybORGLogger):
         # hacky fix to enable operational firewall for Scenario1b and Scenario2
         self.operational_firewall = scenario.operational_firewall
         self.blocks: Dict[str, List[str]] = {}
+
+    def is_traffic_blocked(self, hostname_a: str, hostname_b: str) -> bool:
+        """Returns True if a block rule stops traffic between two hosts, in either direction.
+
+        A rule is an entry in self.blocks: blocks[owner] contains target. The owner and target can each be
+        a subnet name or a hostname, so a rule can be subnet<->subnet, subnet<->host or host<->host.
+        A rule between X and Y blocks traffic from X to Y and from Y to X, regardless of which side owns it.
+
+        """
+        if not self.blocks:
+            return False
+        ids_a = (hostname_a, getattr(self.hostname_subnet_map[hostname_a], 'value', self.hostname_subnet_map[hostname_a]))
+        ids_b = (hostname_b, getattr(self.hostname_subnet_map[hostname_b], 'value', self.hostname_subnet_map[hostname_b]))
+        for owners, targets in ((ids_a, ids_b), (ids_b, ids_a)):
+            for owner in owners:
+                rules = self.blocks.get(owner)
+                if rules and any(target in rules for target in targets):
+                    return True
+        return False
 
     def get_true_state(self, info: dict) -> Observation:
         """Create's a dictionary containing the requested information from the state.

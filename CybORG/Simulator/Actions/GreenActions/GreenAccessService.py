@@ -180,20 +180,11 @@ class GreenAccessService(RemoteAction):
         from_host = state.ip_addresses[self.dest_ip]
         from_host_obj = state.hosts[from_host]
         self.dest_port = state.hosts[from_host].get_ephemeral_port()
-        from_subnet = state.hostname_subnet_map[from_host].value
-
         to_host = state.ip_addresses[self.ip_address]
-        to_subnet = state.hostname_subnet_map[to_host].value
 
-        # (a) Check for firewall blocks of inbound or outbound connections to and from the to/from subnets
-        connection_failure_flag = False
-        if to_subnet in state.blocks.keys():
-            if from_subnet in state.blocks[to_subnet]:
-                connection_failure_flag = True
-        if from_subnet in state.blocks.keys():
-            if to_subnet in state.blocks[from_subnet]:
-                connection_failure_flag = True
-        
+        # (a) Check for firewall blocks (two-way; subnet<->subnet, subnet<->host or host<->host) between the hosts
+        connection_failure_flag = state.is_traffic_blocked(from_host, to_host)
+
         # If they are blocked, then make an event
         if connection_failure_flag:
             event = NetworkConnection(

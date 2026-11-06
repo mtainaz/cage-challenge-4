@@ -45,6 +45,25 @@ class ControlTraffic(LocalAction):
         raise NotImplementedError
     
 
+def _zone_rule(action, state: State):
+    """Returns (owner, target): the entry a zone action adds to / removes from state.blocks[owner].
+    Without to_host this is the subnet rule (owner to_subnet, target from_subnet).
+    With to_host, from_subnet blocks that host in to_subnet (owner from_subnet, target to_host).
+    Returns None (after logging why) if the action's arguments are not valid."""
+    if action.to_host is None:
+        return action.to_subnet, action.from_subnet
+    if action.to_host not in state.hostname_subnet_map:
+        action.log(f"'{action.to_host}' is not a valid host.")
+        return None
+    host_subnet = getattr(state.hostname_subnet_map[action.to_host], 'value', state.hostname_subnet_map[action.to_host])
+    if host_subnet != action.to_subnet:
+        action.log(f"'{action.to_host}' is not in subnet '{action.to_subnet}'.")
+        return None
+    if action.from_subnet == action.to_subnet:
+        action.log(f"'{action.to_host}' is in '{action.from_subnet}'; a subnet can only block a host in another subnet.")
+        return None
+    return action.from_subnet, action.to_host
+
 class BlockTraffic(ControlTraffic):
     def __init__(self, session: int, agent: str, ip_address: IPv4Address):
         super().__init__(session, agent)
@@ -61,15 +80,21 @@ class BlockTraffic(ControlTraffic):
 
 class BlockTrafficZone(ControlTraffic):
     """Action that enables Blue agents to block off access between two subnets in the network. This functionality mimics firewall rules.
+
+    Blocks are two-way: traffic is stopped in both directions between the two sides of the rule.
+    By default the rule covers the whole of to_subnet. If to_host is given, from_subnet only blocks that one host
+    in to_subnet, and the rest of to_subnet can still talk to from_subnet.
     
     Attributes
     ----------
     from_subnet: str
-        name of subnet that the traffic should be blocked from
+        name of the subnet doing the blocking
     to_subnet: str
-        name of subnet that the traffic should be blocked from going to
+        name of the subnet that is blocked (or that contains the blocked host)
+    to_host: str
+        optional hostname (in to_subnet) to block instead of the whole of to_subnet
     """
-    def __init__(self, session: int, agent: str, from_subnet: str, to_subnet: str):
+    def __init__(self, session: int, agent: str, from_subnet: str, to_subnet: str, to_host: str = None):
         """
         Parameters
         ----------
@@ -78,13 +103,16 @@ class BlockTrafficZone(ControlTraffic):
         agent: str
             name of agent performing action
         from_subnet: str
-            name of subnet that the traffic should be blocked from
+            name of the subnet doing the blocking
         to_subnet: str
-            name of subnet that the traffic should be blocked from going to
+            name of the subnet that is blocked (or that contains the blocked host)
+        to_host: str, optional
+            hostname in to_subnet to block, instead of the whole subnet
         """
         super().__init__(session, agent)
         self.from_subnet = from_subnet
         self.to_subnet = to_subnet
+        self.to_host = to_host
 
     def execute_control_traffic(self, state: State) -> Observation:
         """Checks for pre-existing blocks, and blocks the connection between the to and from subnet.
@@ -107,12 +135,17 @@ class BlockTrafficZone(ControlTraffic):
         if self.to_subnet not in state.subnet_name_to_cidr.keys():
             self.log(f"'{self.to_subnet}' is not a valid subnet.")
             return Observation(False)
+        # The rule covers the whole subnet, or just to_host if one is given
+        rule = _zone_rule(self, state)
+        if rule is None:
+            return Observation(False)
+        owner, target = rule
         # Check not already blocked
-        if self.to_subnet in state.blocks and self.from_subnet in state.blocks[self.to_subnet]:
-            self.log(f"'{self.to_subnet}' is already blocked by '{self.from_subnet}'.")
+        if owner in state.blocks and target in state.blocks[owner]:
+            self.log(f"'{owner}' is already blocked by '{target}'.")
             return Observation(False)
 
-        state.blocks.setdefault(self.to_subnet, []).append(self.from_subnet)
+        state.blocks.setdefault(owner, []).append(target)
         return Observation(True)
 
 class AllowTraffic(ControlTraffic):
@@ -131,15 +164,20 @@ class AllowTraffic(ControlTraffic):
 
 class AllowTrafficZone(ControlTraffic):
     """Action that enables Blue agents to unblock access between two subnets in the network. This functionality mimics reversing firewall rules.
+
+    Removes the rule that BlockTrafficZone added with the same arguments. If to_host is given, only the
+    block on that host is removed.
     
     Attributes
     ----------
     from_subnet: str
-        name of subnet that the traffic should be unblocked from
+        name of the subnet that was doing the blocking
     to_subnet: str
-        name of subnet that the traffic should be unblocked from going to
+        name of the subnet that was blocked (or that contains the blocked host)
+    to_host: str
+        optional hostname (in to_subnet) whose block should be removed instead of the whole-subnet block
     """
-    def __init__(self, session: int, agent: str, from_subnet: str, to_subnet: IPv4Network):
+    def __init__(self, session: int, agent: str, from_subnet: str, to_subnet: IPv4Network, to_host: str = None):
         """
         Parameters
         ----------
@@ -148,13 +186,16 @@ class AllowTrafficZone(ControlTraffic):
         agent: str
             name of agent performing action
         from_subnet: str
-            name of subnet that the traffic should be unblocked from
+            name of the subnet that was doing the blocking
         to_subnet: str
-            name of subnet that the traffic should be unblocked from going to
+            name of the subnet that was blocked (or that contains the blocked host)
+        to_host: str, optional
+            hostname in to_subnet whose block should be removed, instead of the whole subnet
         """
         super().__init__(session, agent)
         self.from_subnet = from_subnet
         self.to_subnet = to_subnet
+        self.to_host = to_host
 
     def execute_control_traffic(self, state: State) -> Observation:
         """Checks for specific pre-existing block, and removes it.
@@ -177,9 +218,13 @@ class AllowTrafficZone(ControlTraffic):
         if self.to_subnet not in state.subnet_name_to_cidr.keys():
             self.log(f"'{self.to_subnet}' is not a valid subnet.")
             return Observation(False)
-        # Check not already blocked
-        if self.to_subnet in state.blocks and self.from_subnet in state.blocks[self.to_subnet]:
-            state.blocks[self.to_subnet].remove(self.from_subnet)
+        rule = _zone_rule(self, state)
+        if rule is None:
+            return Observation(False)
+        owner, target = rule
+        # Check there is a block to remove
+        if owner in state.blocks and target in state.blocks[owner]:
+            state.blocks[owner].remove(target)
             return Observation(True)
-        self.log(f"'{self.to_subnet}' is not blocked by '{self.from_subnet}'.")
+        self.log(f"'{owner}' is not blocked by '{target}'.")
         return Observation(False)
